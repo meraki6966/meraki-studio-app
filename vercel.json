@@ -1,0 +1,12 @@
+{
+  "rewrites": [
+    {
+      "source": "/api/:path*",
+      "destination": "https://meraki-studio-api.up.railway.app/api/:path*"
+    },
+    {
+      "source": "/mcp",
+      "destination": "https://meraki-studio-api.up.railway.app/mcp"
+    }
+  ]
+}
