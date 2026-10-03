@@ -1,7 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import type { Project } from '../types';
-
-const API = import.meta.env.VITE_API_URL || '';
+import { api } from '../api';
 
 export function useProject(projectId: string | null, pollInterval = 4000) {
   const [project, setProject] = useState<Project | null>(null);
@@ -11,7 +10,7 @@ export function useProject(projectId: string | null, pollInterval = 4000) {
   const fetch = useCallback(async () => {
     if (!projectId) return;
     try {
-      const res = await window.fetch(`${API}/api/projects/${projectId}`);
+      const res = await api(`/api/projects/${encodeURIComponent(projectId)}`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       setProject(data.project);
@@ -33,7 +32,7 @@ export function useProject(projectId: string | null, pollInterval = 4000) {
 }
 
 export async function fetchProjects(): Promise<Project[]> {
-  const res = await window.fetch(`${API}/api/projects`);
+  const res = await api('/api/projects');
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const data = await res.json();
   return data.projects || [];

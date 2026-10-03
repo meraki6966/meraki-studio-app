@@ -5,8 +5,7 @@ import { AssetPanel } from './components/AssetPanel';
 import { Timeline } from './components/Timeline';
 import { useProject, fetchProjects } from './hooks/useProject';
 import type { Project, Asset } from './types';
-
-const API = import.meta.env.VITE_API_URL || '';
+import { callTool, clearToken, hasToken, setToken, LockedError, UnauthorizedError } from './api';
 
 export default function App() {
   const [projectId, setProjectId] = useState<string | null>(null);
@@ -20,11 +19,24 @@ export default function App() {
   const [renderStatus, setRenderStatus] = useState<string | null>(null);
   const [notification, setNotification] = useState<{ msg: string; type: 'success' | 'error' | 'info' } | null>(null);
 
-  const { project, error } = useProject(projectId, 3000);
+  const [unlocked, setUnlocked] = useState(hasToken());
+  const [tokenInput, setTokenInput] = useState('');
+  const [gateError, setGateError] = useState<string | null>(null);
+  const [checking, setChecking] = useState(false);
+
+  const { project, error } = useProject(unlocked ? projectId : null, 3000);
   const playTimer = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Auto-select first project on load
+  // If the API stops accepting the token, go back to the token screen.
   useEffect(() => {
+    const lock = () => { setUnlocked(false); setProjectId(null); setAllProjects([]); setGateError('The studio token was not accepted. Enter it again.'); };
+    window.addEventListener('studio-unauthorized', lock);
+    return () => window.removeEventListener('studio-unauthorized', lock);
+  }, []);
+
+  // Auto-select first project once the studio is unlocked
+  useEffect(() => {
+    if (!unlocked) return;
     fetchProjects()
       .then(projects => {
         setAllProjects(projects);
@@ -32,15 +44,49 @@ export default function App() {
           setProjectId(projects[0].id);
         }
       })
-      .catch(() => notify('Could not reach the MCP server. Is it running on port 19789?', 'error'));
-  }, []);
+      .catch((err) => {
+        if (err instanceof UnauthorizedError) return;
+        notify(err instanceof LockedError ? err.message : 'Could not reach the Studio API.', 'error');
+      });
+  }, [unlocked]);
 
   // Refresh project list when picker opens
   useEffect(() => {
-    if (showProjectPicker) {
+    if (showProjectPicker && unlocked) {
       fetchProjects().then(setAllProjects).catch(() => {});
     }
-  }, [showProjectPicker]);
+  }, [showProjectPicker, unlocked]);
+
+  const handleUnlock = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!tokenInput.trim() || checking) return;
+    setChecking(true);
+    setGateError(null);
+    setToken(tokenInput);
+    try {
+      const projects = await fetchProjects();
+      setAllProjects(projects);
+      setTokenInput('');
+      setUnlocked(true);
+    } catch (err) {
+      clearToken();
+      setGateError(
+        err instanceof UnauthorizedError ? 'That token was not accepted.'
+          : err instanceof LockedError ? err.message
+          : 'Could not reach the Studio API.'
+      );
+    } finally {
+      setChecking(false);
+    }
+  };
+
+  const handleLock = () => {
+    clearToken();
+    setUnlocked(false);
+    setProjectId(null);
+    setAllProjects([]);
+    setGateError(null);
+  };
 
   // Playback simulation
   useEffect(() => {
@@ -70,17 +116,7 @@ export default function App() {
     setRendering(true);
     setRenderStatus('Starting render...');
     try {
-      const res = await fetch(`${API}/mcp`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          jsonrpc: '2.0',
-          method: 'tools/call',
-          params: { name: 'render_project', arguments: { projectId, quality: 'draft' } },
-          id: Date.now(),
-        }),
-      });
-      const data = await res.json();
+      const data = await callTool('render_project', { projectId, quality: 'draft' });
       const result = data.result?.content?.[0]?.text;
       if (result) {
         const parsed = JSON.parse(result);
@@ -98,17 +134,7 @@ export default function App() {
   const pollRenderJob = useCallback(async (jobId: string) => {
     const interval = setInterval(async () => {
       try {
-        const res = await fetch(`${API}/mcp`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            jsonrpc: '2.0',
-            method: 'tools/call',
-            params: { name: 'check_render_status', arguments: { jobId } },
-            id: Date.now(),
-          }),
-        });
-        const data = await res.json();
+        const data = await callTool('check_render_status', { jobId });
         const result = JSON.parse(data.result?.content?.[0]?.text || '{}');
 
         if (result.status === 'done') {
@@ -131,6 +157,44 @@ export default function App() {
       }
     }, 3000);
   }, []);
+
+  // The API refuses every request without the studio token, so nothing else
+  // is drawn until one has been accepted.
+  if (!unlocked) {
+    return (
+      <div style={{ height: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
+        <form onSubmit={handleUnlock} style={{ width: '100%', maxWidth: 380, display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <div style={{ fontFamily: 'var(--font-display)', fontSize: 32, color: 'var(--amber)', letterSpacing: '-0.02em' }}>
+            Meraki Video Studio
+          </div>
+          <label htmlFor="studio-token" style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+            Studio token
+          </label>
+          <input
+            id="studio-token"
+            type="password"
+            autoComplete="off"
+            spellCheck={false}
+            value={tokenInput}
+            onChange={(e) => setTokenInput(e.target.value)}
+            aria-describedby="studio-token-note"
+            autoFocus
+          />
+          <button className="btn btn-primary" type="submit" disabled={checking || !tokenInput.trim()}>
+            {checking ? 'Checking' : 'Unlock'}
+          </button>
+          {gateError && (
+            <div role="alert" style={{ padding: '10px 14px', background: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.25)', borderRadius: 6, color: '#f87171', fontSize: 12 }}>
+              {gateError}
+            </div>
+          )}
+          <div id="studio-token-note" style={{ fontSize: 11, color: 'var(--text-secondary)', lineHeight: 1.6 }}>
+            The token is the STUDIO_API_TOKEN set on the server. It is kept in this browser tab only and is gone when the tab closes.
+          </div>
+        </form>
+      </div>
+    );
+  }
 
   return (
     <div style={{ height: '100vh', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
@@ -387,8 +451,11 @@ export default function App() {
               lineHeight: 1.7,
             }}>
               Projects are created and managed by Claude Code via MCP.
-              <br />Connect: <span style={{ color: 'var(--text-amber)' }}>claude mcp add --transport http meraki-studio http://127.0.0.1:19789/mcp</span>
+              <br />Connect: <span style={{ color: 'var(--text-amber)' }}>claude mcp add --transport http meraki-studio http://127.0.0.1:19789/mcp --header "Authorization: Bearer YOUR_TOKEN"</span>
             </div>
+            <button className="btn btn-ghost" type="button" onClick={handleLock} style={{ marginTop: 12 }}>
+              Lock the studio on this tab
+            </button>
           </div>
         </div>
       )}
